@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ZubiMerge Blitz</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, query, orderBy, limit } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // Expose Firebase modules to the global scope for the React script
+        window.firebase = {
+            initializeApp,
+            getAuth,
+            signInAnonymously,
+            signInWithCustomToken,
+            getFirestore,
+            collection,
+            addDoc,
+            onSnapshot,
+            query,
+            orderBy,
+            limit
+        };
+    </script>
+
+    <style>
+        /* Custom CSS animations */
+        @keyframes pop-in {
+            0% { transform: scale(0); opacity: 0; }
+            80% { transform: scale(1.1); opacity: 1; }
+            100% { transform: scale(1); }
+        }
+
+        @keyframes merge-pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.2); }
+            100% { transform: scale(1); }
+        }
+
+        @keyframes shake-horizontal {
+            0%, 100% { transform: translateX(0); }
+            10%, 30%, 50%, 70%, 90% { transform: translateX(-10px); }
+            20%, 40%, 60%, 80% { transform: translateX(10px); }
+        }
+
+        @keyframes pulse-yellow {
+            0%, 100% { box-shadow: 0 0 15px rgba(252, 211, 77, 0.5); }
+            50% { box-shadow: 0 0 25px rgba(252, 211, 77, 1); }
+        }
+        
+        @keyframes countdown-pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.2); }
+        }
+
+        /* Applying the animations */
+        .pop-in-animation {
+            animation: pop-in 0.3s ease-out;
+        }
+
+        .merge-animation {
+            animation: merge-pulse 0.4s ease-in-out;
+        }
+
+        .shake-animation {
+            animation: shake-horizontal 0.8s ease-in-out;
+        }
+
+        .pulse-yellow-animation {
+            animation: pulse-yellow 1.5s infinite;
+        }
+
+        .countdown-pulse {
+            animation: countdown-pulse 1s linear infinite;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white font-sans">
+
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useCallback, useRef } = React;
+        const rootElement = ReactDOM.createRoot(document.getElementById('root'));
+
+        // --- Tone.js Sound Setup ---
+        // This is a browser security measure, audio context needs to be started by a user gesture.
+        let isAudioContextStarted = false;
+        const startAudio = () => {
+            if (!isAudioContextStarted) {
+                Tone.start();
+                isAudioContextStarted = true;
+                // Clean up the event listeners after the first interaction
+                document.body.removeEventListener('click', startAudio);
+                document.body.removeEventListener('touchstart', startAudio);
+            }
+        };
+        document.body.addEventListener('click', startAudio);
+        document.body.addEventListener('touchstart', startAudio);
+
+        const synth = new Tone.Synth({
+            oscillator: { type: "sine" },
+            envelope: {
+                attack: 0.05,
+                decay: 0.2,
+                sustain: 0.1,
+                release: 0.8,
+            }
+        }).toDestination();
+        
+        const playSound = (note = "C4", duration = "8n") => {
+            if (isAudioContextStarted) {
+                synth.triggerAttackRelease(note, duration);
+            }
+        };
+
+        // Custom hook for the countdown timer
+        const useCountdown = (initialTime, onFinish, isPaused) => {
+            const [countdown, setCountdown] = useState(initialTime);
+            const intervalRef = useRef(null);
+        
+            useEffect(() => {
+                if (isPaused) {
+                    if (intervalRef.current) {
+                        clearInterval(intervalRef.current);
+                        intervalRef.current = null;
+                    }
+                    return;
+                }
+        
+                if (intervalRef.current) {
+                    clearInterval(intervalRef.current);
+                }
+        
+                intervalRef.current = setInterval(() => {
+                    setCountdown(prev => {
+                        if (prev <= 1) {
+                            clearInterval(intervalRef.current);
+                            onFinish();
+                            return initialTime; // Reset for the next cycle
+                        }
+                        return prev - 1;
+                    });
+                }, 1000);
+        
+                return () => {
+                    if (intervalRef.current) {
+                        clearInterval(intervalRef.current);
+                    }
+                };
+            }, [initialTime, onFinish, isPaused]);
+        
+            return countdown;
+        };
+
+        const App = () => {
+            // Generates the initial numbers (2, 4, 8, ...) up to 32768
+            const numbers = (() => {
+                const nums = [];
+                const colors = [
+                    'bg-red-500', 'bg-blue-500', 'bg-green-500', 'bg-yellow-500', 'bg-purple-500',
+                    'bg-pink-500', 'bg-indigo-500', 'bg-teal-500', 'bg-orange-500', 'bg-cyan-500',
+                    'bg-fuchsia-500', 'bg-lime-500', 'bg-rose-500', 'bg-amber-500', 'bg-emerald-500'
+                ];
+                for (let i = 2, j = 0; i <= 32768; i *= 2, j++) {
+                    nums.push({ value: i, color: colors[j % colors.length], type: 'number' });
+                }
+                return nums;
+            })();
+            
+            // Special blocks with icons
+            const specialBlocks = [
+                { type: 'swap', icon: 'exchange-alt', color: 'bg-indigo-500' },
+                { type: 'hammer', icon: 'hammer', color: 'bg-gray-500' },
+                { type: 'doubler', icon: 'dice-two', color: 'bg-yellow-500' },
+                { type: 'freeze', icon: 'snowflake', color: 'bg-blue-400' },
+                { type: 'bomb', icon: 'bomb', color: 'bg-red-500' },
+                { type: 'shuffler', icon: 'random', color: 'bg-green-500' },
+            ];
+
+            const [dropZone, setDropZone] = useState([]);
+            const [grid, setGrid] = useState(Array(5).fill(null).map(() => Array(5).fill(null)));
+            const [score, setScore] = useState(0);
+            const [gameOver, setGameOver] = useState(false);
+            const [highestValue, setHighestValue] = useState(null);
+            const [selectedDropZoneBlock, setSelectedDropZoneBlock] = useState(null);
+            const [swapSelection, setSwapSelection] = useState([]);
+            const [message, setMessage] = useState('');
+            const [leaderboard, setLeaderboard] = useState([]);
+            const [showNameInput, setShowNameInput] = useState(false);
+            const [userName, setUserName] = useState('');
+            const [showTutorial, setShowTutorial] = useState(false); // New state for tutorial
+            
+            // Firebase state
+            const [firebaseReady, setFirebaseReady] = useState(false);
+            const [db, setDb] = useState(null);
+            const [auth, setAuth] = useState(null);
+            const [userId, setUserId] = useState(null);
+            
+            // Firebase initialization
+            useEffect(() => {
+                const initFirebase = async () => {
+                    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+                    const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+                    if (!firebaseConfig.apiKey) {
+                        console.error("Firebase config is missing or incomplete.");
+                        return;
+                    }
+
+                    const app = firebase.initializeApp(firebaseConfig, appId);
+                    const firestore = firebase.getFirestore(app);
+                    const authInstance = firebase.getAuth(app);
+                    
+                    setDb(firestore);
+                    setAuth(authInstance);
+
+                    try {
+                        if (initialAuthToken) {
+                            await firebase.signInWithCustomToken(authInstance, initialAuthToken);
+                        } else {
+                            await firebase.signInAnonymously(authInstance);
+                        }
+                        const currentUserId = authInstance.currentUser?.uid || crypto.randomUUID();
+                        setUserId(currentUserId);
+                        setFirebaseReady(true);
+                    } catch (error) {
+                        console.error("Firebase authentication failed:", error);
+                    }
+                };
+
+                initFirebase();
+            }, []);
+
+            // Leaderboard listener
+            useEffect(() => {
+                if (firebaseReady && db) {
+                    const leaderboardCollection = firebase.collection(db, `artifacts/${userId}/public/data/leaderboard`);
+                    const q = firebase.query(leaderboardCollection, firebase.orderBy('score', 'desc'), firebase.limit(10));
+                    
+                    const unsubscribe = firebase.onSnapshot(q, (snapshot) => {
+                        const scores = snapshot.docs.map(doc => ({
+                            id: doc.id,
+                            ...doc.data()
+                        }));
+                        setLeaderboard(scores);
+                    }, (error) => {
+                        console.error("Error fetching leaderboard:", error);
+                    });
+
+                    return () => unsubscribe();
+                }
+            }, [firebaseReady, db, userId]);
+
+            const saveScore = async () => {
+                if (score > 0 && userName && firebaseReady) {
+                    try {
+                        const leaderboardCollection = firebase.collection(db, `artifacts/${userId}/public/data/leaderboard`);
+                        await firebase.addDoc(leaderboardCollection, {
+                            name: userName,
+                            score: score,
+                            createdAt: new Date().toISOString()
+                        });
+                        console.log("Score saved successfully!");
+                        setMessage("Score saved to the leaderboard!");
+                        setShowNameInput(false);
+                    } catch (error) {
+                        console.error("Error saving score:", error);
+                        setMessage("Failed to save score. Please try again.");
+                    }
+                }
+            };
+
+
+            // Function to add a random block to the drop zone
+            const addRandomBlockToDropZone = useCallback(() => {
+                // If dropZone is already full, game over.
+                if (dropZone.length >= 3) {
+                    setGameOver(true);
+                    return;
+                }
+
+                // Randomly add a number block (95% chance) or a special block (5% chance)
+                const isSpecial = Math.random() < 0.05;
+                let randomBlock;
+
+                if (isSpecial) {
+                    const randomIndex = Math.floor(Math.random() * specialBlocks.length);
+                    randomBlock = specialBlocks[randomIndex];
+                } else {
+                    const randomIndex = Math.floor(Math.random() * numbers.length);
+                    randomBlock = numbers[randomIndex];
+                }
+
+                setDropZone(prev => [...prev, randomBlock]);
+                playSound("C6", "16n");
+            }, [dropZone.length, numbers, specialBlocks]);
+
+            // Timer to add a new block
+            const countdown = useCountdown(3, addRandomBlockToDropZone, gameOver || showNameInput || showTutorial);
+
+            // Recalculate the score whenever the grid changes
+            useEffect(() => {
+                let newScore = 0;
+                let newHighest = 0;
+                let gridFull = true;
+                for (const row of grid) {
+                    for (const cell of row) {
+                        if (cell) {
+                            newScore += cell.value;
+                            if (cell.value > newHighest) {
+                                newHighest = cell.value;
+                            }
+                        } else {
+                            gridFull = false;
+                        }
+                    }
+                }
+                setScore(newScore);
+                setHighestValue(newHighest);
+
+                // Game Over condition based on drop zone size
+                if (dropZone.length >= 4 && !gameOver) {
+                    setGameOver(true);
+                    playSound("C2", "2n");
+                } else if (gridFull && !gameOver) {
+                    setGameOver(true);
+                    playSound("C2", "2n");
+                }
+            }, [grid, dropZone.length]);
+
+            useEffect(() => {
+                if (gameOver) {
+                    const lowestLeaderboardScore = leaderboard.length > 0 ? leaderboard[leaderboard.length - 1].score : 0;
+                    if (score > lowestLeaderboardScore || leaderboard.length < 10) {
+                        setShowNameInput(true);
+                    }
+                }
+            }, [gameOver, score, leaderboard]);
+
+            // Handle clicking a block in the drop zone
+            const handleDropZoneClick = (block) => {
+                if (gameOver || showTutorial || showNameInput) return;
+                setSelectedDropZoneBlock(block);
+                setMessage('');
+            };
+
+            // Function to shuffle the grid
+            const shuffleGrid = (currentGrid) => {
+                let newGrid = JSON.parse(JSON.stringify(currentGrid));
+                const nonNullBlocks = [];
+                for (let r = 0; r < 5; r++) {
+                    for (let c = 0; c < 5; c++) {
+                        if (newGrid[r][c]) {
+                            nonNullBlocks.push(newGrid[r][c]);
+                            newGrid[r][c] = null;
+                        }
+                    }
+                }
+                // Fisher-Yates shuffle algorithm
+                for (let i = nonNullBlocks.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    [nonNullBlocks[i], nonNullBlocks[j]] = [nonNullBlocks[j], nonNullBlocks[i]];
+                }
+                
+                let blockIndex = 0;
+                for (let r = 4; r >= 0; r--) {
+                    for (let c = 0; c < 5; c++) {
+                        if (blockIndex < nonNullBlocks.length) {
+                            newGrid[r][c] = nonNullBlocks[blockIndex];
+                            blockIndex++;
+                        }
+                    }
+                }
+                
+                return newGrid;
+            }
+
+            // Recursive function to merge adjacent blocks
+            const mergeBlocks = (currentGrid) => {
+                let merged = false;
+                let newGrid = JSON.parse(JSON.stringify(currentGrid));
+
+                const checkAndMerge = (r, c) => {
+                    if (newGrid[r][c] && !newGrid[r][c].isFrozen) {
+                        const value = newGrid[r][c].value;
+                        const neighbors = [
+                            [r - 1, c], [r + 1, c], [r, c - 1], [r, c + 1]
+                        ];
+
+                        for (const [nr, nc] of neighbors) {
+                            if (nr >= 0 && nr < 5 && nc >= 0 && nc < 5 && newGrid[nr][nc] && newGrid[nr][nc].value === value && !newGrid[nr][nc].isFrozen) {
+                                newGrid[r][c] = { value: value * 2, color: newGrid[r][c].color, type: 'number', isMerging: true };
+                                newGrid[nr][nc] = null;
+                                merged = true;
+                                playSound("F#4", "16n");
+                                newGrid = gravity(newGrid);
+                                newGrid = mergeBlocks(newGrid);
+                                return;
+                            }
+                        }
+                    }
+                };
+
+                for (let r = 0; r < 5; r++) {
+                    for (let c = 0; c < 5; c++) {
+                        if (newGrid[r][c]) {
+                            checkAndMerge(r, c);
+                            if(merged) break;
+                        }
+                    }
+                    if(merged) break;
+                }
+                return newGrid;
+            };
+
+            // Apply gravity: numbers fall to the lowest available spot
+            const gravity = (currentGrid) => {
+                const newGrid = currentGrid.map(row => [...row]);
+                for (let c = 0; c < 5; c++) {
+                    let writeRow = 4;
+                    for (let r = 4; r >= 0; r--) {
+                        if (newGrid[r][c]) {
+                            if (r !== writeRow) {
+                                newGrid[writeRow][c] = newGrid[r][c];
+                                newGrid[r][c] = null;
+                            }
+                            writeRow--;
+                        }
+                    }
+                }
+                return newGrid;
+            };
+
+            // Main handler for all grid clicks
+            const handleGridClick = (r, c) => {
+                if (gameOver || showTutorial || showNameInput) return;
+                
+                if (!selectedDropZoneBlock) {
+                    setMessage('Please select a block from the drop zone first.');
+                    return;
+                }
+
+                let newGrid = JSON.parse(JSON.stringify(grid));
+                let blockUsed = false;
+                let message = '';
+                
+                const selectedIndex = dropZone.findIndex(block => block === selectedDropZoneBlock);
+                if (selectedIndex === -1) return;
+                
+                const newDropZone = dropZone.filter((_, index) => index !== selectedIndex);
+
+                // Handle special blocks
+                if (selectedDropZoneBlock.type !== 'number') {
+                    switch (selectedDropZoneBlock.type) {
+                        case 'swap':
+                            if (!newGrid[r][c]) {
+                                setMessage('You can only swap two existing blocks.');
+                                return;
+                            }
+                            if (swapSelection.length === 0) {
+                                setSwapSelection([r, c]);
+                                setMessage('Select a second block to swap.');
+                                playSound("C5", "16n");
+                                // Don't remove the block from the drop zone yet
+                                setSelectedDropZoneBlock(selectedDropZoneBlock);
+                                setDropZone(dropZone);
+                                return;
+                            } else {
+                                const [r1, c1] = swapSelection;
+                                if (!newGrid[r1][c1]) {
+                                    setMessage('You can only swap two existing blocks.');
+                                    return;
+                                }
+                                // Swap the blocks
+                                const temp = newGrid[r][c];
+                                newGrid[r][c] = newGrid[r1][c1];
+                                newGrid[r1][c1] = temp;
+                                
+                                setSwapSelection([]);
+                                blockUsed = true;
+                                message = 'Blocks swapped!';
+                                playSound("G5", "8n");
+                            }
+                            break;
+                        case 'hammer':
+                            if (newGrid[r][c]) {
+                                newGrid[r][c] = null;
+                                newGrid = gravity(newGrid);
+                                blockUsed = true;
+                                message = 'Block hammered!';
+                                playSound("C3", "8n");
+                            }
+                            break;
+                        case 'doubler':
+                            if (newGrid[r][c] && newGrid[r][c].type === 'number') {
+                                newGrid[r][c].value *= 2;
+                                newGrid[r][c].isMerging = true;
+                                blockUsed = true;
+                                message = 'Block doubled!';
+                                playSound("C6", "8n");
+                            } else {
+                                setMessage('You can only double a number block.');
+                                return;
+                            }
+                            break;
+                        case 'freeze':
+                            if (newGrid[r][c]) {
+                                newGrid[r][c].isFrozen = !newGrid[r][c]?.isFrozen;
+                                blockUsed = true;
+                                message = `Block is now ${newGrid[r][c].isFrozen ? 'frozen' : 'unfrozen'}!`;
+                                playSound("F4", "8n");
+                            }
+                            break;
+                        case 'bomb':
+                            for(let row = 0; row < 5; row++) {
+                                newGrid[row][c] = null;
+                            }
+                            newGrid = gravity(newGrid);
+                            blockUsed = true;
+                            message = 'Column bombed!';
+                            playSound("C3", "8n");
+                            break;
+                        case 'shuffler':
+                            newGrid = shuffleGrid(newGrid);
+                            blockUsed = true;
+                            message = 'Grid shuffled!';
+                            playSound("A4", "8n");
+                            break;
+                    }
+
+                    if (blockUsed) {
+                        if (selectedDropZoneBlock.type !== 'freeze' || !newGrid[r][c]?.isFrozen) {
+                            newGrid = mergeBlocks(newGrid);
+                            newGrid = gravity(newGrid);
+                            newGrid = mergeBlocks(newGrid);
+                        }
+                        
+                        setGrid(newGrid);
+                        setDropZone(newDropZone);
+                        setSelectedDropZoneBlock(null);
+                        setMessage(message);
+                    } else {
+                        // If a special block wasn't used, don't remove it from the drop zone
+                        setSelectedDropZoneBlock(null);
+                    }
+                } 
+                // Handle number block drops
+                else {
+                    let row = -1;
+                    for (let i = 4; i >= 0; i--) {
+                        if (!newGrid[i][c]) {
+                            row = i;
+                            break;
+                        }
+                    }
+
+                    if (row !== -1) {
+                        newGrid[row][c] = { ...selectedDropZoneBlock, isNew: true };
+                        setDropZone(newDropZone);
+                        setSelectedDropZoneBlock(null);
+                        
+                        playSound("C5", "16n");
+
+                        let finalGrid = gravity(newGrid);
+                        finalGrid = mergeBlocks(finalGrid);
+                        finalGrid = gravity(finalGrid);
+                        finalGrid = mergeBlocks(finalGrid);
+                        
+                        setGrid(finalGrid);
+                    } else {
+                        setMessage('This column is full. Try another column or a special block!');
+                        // Don't remove the block from the drop zone if the drop failed
+                        setSelectedDropZoneBlock(null);
+                    }
+                }
+            };
+            
+            // --- Reset Game ---
+            const handleReset = () => {
+                setDropZone([]);
+                setGrid(Array(5).fill(null).map(() => Array(5).fill(null)));
+                setScore(0);
+                setGameOver(false);
+                setHighestValue(null);
+                setSelectedDropZoneBlock(null);
+                setSwapSelection([]);
+                setMessage('');
+                setShowNameInput(false);
+                setUserName('');
+                setShowTutorial(false);
+            };
+
+            const getBlockDisplay = (block) => {
+                if (block.type === 'number') {
+                    return block.value;
+                } else {
+                    return <i className={`fas fa-${block.icon}`}></i>;
+                }
+            };
+
+            const Leaderboard = () => (
+                <div className="bg-gray-800 p-6 rounded-xl shadow-lg mt-8 w-full max-w-sm">
+                    <h2 className="text-2xl font-bold text-center mb-4">Leaderboard</h2>
+                    <ol className="list-decimal list-inside space-y-2 text-lg">
+                        {leaderboard.length > 0 ? (
+                            leaderboard.map((entry, index) => (
+                                <li key={entry.id} className="flex justify-between items-center bg-gray-700 p-2 rounded-lg">
+                                    <span className="font-bold">{entry.name}</span>
+                                    <span className="text-green-400 font-mono">{entry.score}</span>
+                                </li>
+                            ))
+                        ) : (
+                            <p className="text-center text-gray-400">No scores yet. Be the first!</p>
+                        )}
+                    </ol>
+                </div>
+            );
+
+            // Tutorial component
+            const Tutorial = () => (
+                <div className="fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center p-4 z-50">
+                    <div className="bg-gray-800 p-8 rounded-xl shadow-2xl max-w-xl w-full max-h-full overflow-y-auto transform scale-100 pop-in-animation">
+                        <h2 className="text-3xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-purple-600 mb-4 text-center">How to Play</h2>
+                        <div className="space-y-4 text-lg text-gray-200">
+                            <p>
+                                The goal of ZubiMerge Blitz is to merge blocks with the same number to create a higher value. A new block appears in the drop zone every 3 seconds.
+                            </p>
+                            <ul className="list-disc list-inside space-y-2">
+                                <li><strong>Drop blocks:</strong> Click on a block in the **Drop Zone** at the top, then click on a column in the **Game Grid** to place it.</li>
+                                <li><strong>Merge numbers:</strong> When two blocks with the same number are adjacent, they merge into a new block with double the value.</li>
+                                <li><strong>Game over:</strong> The game ends if the drop zone fills up with 3 blocks or if the grid is full.</li>
+                                <li><strong>Score:</strong> Your score is the sum of all the numbers currently on the grid.</li>
+                            </ul>
+                            <p className="text-2xl font-bold mt-6 text-center text-yellow-400">Special Blocks</p>
+                            <ul className="list-disc list-inside space-y-2">
+                                <li className="flex items-center gap-2"><i className="fas fa-exchange-alt text-indigo-400"></i><strong>Swap:</strong> Swap the positions of two blocks on the grid.</li>
+                                <li className="flex items-center gap-2"><i className="fas fa-hammer text-gray-400"></i><strong>Hammer:</strong> Destroy a single block on the grid.</li>
+                                <li className="flex items-center gap-2"><i className="fas fa-dice-two text-yellow-400"></i><strong>Doubler:</strong> Double the value of a single number block.</li>
+                                <li className="flex items-center gap-2"><i className="fas fa-snowflake text-blue-400"></i><strong>Freeze:</strong> Freeze or unfreeze a block, preventing it from merging or being affected by gravity.</li>
+                                <li className="flex items-center gap-2"><i className="fas fa-bomb text-red-400"></i><strong>Bomb:</strong> Destroy an entire column of blocks.</li>
+                                <li className="flex items-center gap-2"><i className="fas fa-random text-green-500"></i><strong>Shuffler:</strong> Shuffle all blocks on the grid into new random positions.</li>
+                            </ul>
+                        </div>
+                        <button
+                            onClick={() => setShowTutorial(false)}
+                            className="mt-6 w-full py-3 px-6 rounded-lg bg-cyan-500 text-white font-bold hover:bg-cyan-600 transition-all active:scale-95"
+                        >
+                            Got It!
+                        </button>
+                    </div>
+                </div>
+            );
+
+            return (
+                <div className="min-h-screen bg-gray-900 text-white p-4 flex flex-col items-center">
+                    <div className="max-w-4xl w-full">
+                        <h1 className="text-6xl font-extrabold text-center my-8 text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-purple-600">
+                            ZubiMerge Blitz
+                        </h1>
+
+                        {/* Message box */}
+                        {message && (
+                            <div className="bg-blue-600 text-white p-3 rounded-lg text-center font-bold mb-4">
+                                {message}
+                            </div>
+                        )}
+                        
+                        {/* Drop zone and undo button */}
+                        <div className="bg-gray-800 p-4 rounded-xl shadow-lg mb-8 flex flex-col items-center">
+                            <h2 className="text-2xl font-bold mb-4 text-center">
+                                Drop Zone ({dropZone.length}/3)
+                            </h2>
+                            <div className="flex justify-center gap-4 w-full h-20">
+                                {dropZone.map((block, index) => (
+                                    <button
+                                        key={index}
+                                        onClick={() => handleDropZoneClick(block)}
+                                        className={`flex-1 flex items-center justify-center rounded-lg text-xl font-bold cursor-pointer transition-all hover:scale-105 active:scale-95
+                                            ${block.color}
+                                            ${selectedDropZoneBlock === block ? 'ring-4 ring-yellow-400 ring-offset-2 ring-offset-gray-800' : ''}
+                                            ${block.isNew ? 'pop-in-animation' : ''}
+                                        `}
+                                    >
+                                        {getBlockDisplay(block)}
+                                    </button>
+                                ))}
+                            </div>
+                            <div className="text-sm text-gray-400 mt-2">
+                                New block in <span className="font-bold text-yellow-400 countdown-pulse">{countdown}</span> seconds
+                            </div>
+                        </div>
+
+                        {/* Game Grid */}
+                        <div className="grid grid-cols-5 gap-2 w-full aspect-square bg-gray-800 p-4 rounded-xl shadow-lg">
+                            {grid.map((row, r) =>
+                                row.map((block, c) => (
+                                    <div
+                                        key={`${r}-${c}`}
+                                        onClick={() => handleGridClick(r, c)}
+                                        className={`w-full aspect-square rounded-lg flex items-center justify-center text-xl font-bold transition-all duration-300
+                                            ${block ? block.color : 'bg-gray-700'}
+                                            ${block?.isMerging ? 'merge-animation' : ''}
+                                            ${block?.isNew ? 'pop-in-animation' : ''}
+                                            ${swapSelection[0] === r && swapSelection[1] === c ? 'ring-4 ring-purple-400 ring-offset-2 ring-offset-gray-800' : ''}
+                                            ${block?.isFrozen ? 'ring-4 ring-blue-300 ring-offset-2 ring-offset-gray-800' : ''}
+                                            ${!block && selectedDropZoneBlock?.type === 'number' ? 'cursor-pointer hover:scale-105' : ''}
+                                        `}
+                                    >
+                                        {block ? getBlockDisplay(block) : ''}
+                                    </div>
+                                ))
+                            )}
+                        </div>
+
+                        {/* Stats and buttons */}
+                        <div className="flex justify-between items-center mt-8 w-full">
+                            <div className="text-center">
+                                <span className="text-lg font-semibold text-gray-400">Score</span>
+                                <div className="text-4xl font-extrabold text-cyan-400">{score}</div>
+                            </div>
+                            <div className="text-center">
+                                <span className="text-lg font-semibold text-gray-400">Highest Block</span>
+                                <div className="text-4xl font-extrabold text-purple-400">{highestValue}</div>
+                            </div>
+                            <div className="flex gap-4">
+                                <button
+                                    onClick={() => setShowTutorial(true)}
+                                    className="p-3 bg-gray-700 text-white rounded-full hover:bg-gray-600 transition-all active:scale-95"
+                                >
+                                    <i className="fas fa-question text-lg"></i>
+                                </button>
+                                <button
+                                    onClick={handleReset}
+                                    className="p-3 bg-red-600 text-white rounded-full hover:bg-red-700 transition-all active:scale-95"
+                                >
+                                    <i className="fas fa-sync-alt text-lg"></i>
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Game Over and Name Input Overlay */}
+                        {(gameOver || showNameInput) && (
+                            <div className="fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center p-4 z-50">
+                                <div className="bg-gray-800 p-8 rounded-xl shadow-2xl text-center transform scale-100 pop-in-animation">
+                                    <h2 className="text-4xl font-extrabold text-red-500 shake-animation">GAME OVER</h2>
+                                    <p className="text-xl mt-4">Your final score is: <span className="text-green-400 font-extrabold">{score}</span></p>
+
+                                    {showNameInput && (
+                                        <div className="mt-6">
+                                            <p className="text-lg mb-2">You made the leaderboard! Enter your name:</p>
+                                            <input
+                                                type="text"
+                                                className="w-full p-2 rounded-lg bg-gray-700 text-white text-center"
+                                                value={userName}
+                                                onChange={(e) => setUserName(e.target.value)}
+                                                placeholder="Enter your name"
+                                            />
+                                            <button
+                                                onClick={saveScore}
+                                                className="mt-4 w-full py-3 px-6 rounded-lg bg-green-500 text-white font-bold hover:bg-green-600 transition-all active:scale-95"
+                                            >
+                                                Save Score
+                                            </button>
+                                        </div>
+                                    )}
+
+                                    <button
+                                        onClick={handleReset}
+                                        className="mt-6 w-full py-3 px-6 rounded-lg bg-cyan-500 text-white font-bold hover:bg-cyan-600 transition-all active:scale-95"
+                                    >
+                                        Play Again
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+                        
+                        {/* Tutorial Overlay */}
+                        {showTutorial && <Tutorial />}
+
+                        {/* Leaderboard */}
+                        <Leaderboard />
+
+                    </div>
+                </div>
+            );
+        };
+
+        // Render the application to the DOM
+        rootElement.render(<App />);
+    </script>
+</body>
+</html>
